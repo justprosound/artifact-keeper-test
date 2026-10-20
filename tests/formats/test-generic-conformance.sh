@@ -119,7 +119,9 @@ fi
 # 6. Re-upload: PUT to a stored path is refused and keeps the original
 #
 # A generic path is write-once: the backend answers a second PUT to a live
-# path with 409 CONFLICT ("Artifact version already exists and is immutable")
+# path with 409 ("Artifact version already exists and is immutable"; body code
+# `IMMUTABLE_RELEASE` from backend fork #5, `CONFLICT` on older servers, so only
+# the status is asserted)
 # and serves the original bytes, whatever the new bytes are. This is the
 # always-on rule (no repository setting), so it holds with any release-
 # immutability policy off. A repository with versioning_enabled appends a
