@@ -2,7 +2,8 @@
 # test-generic-conformance.sh - Generic repository (raw file storage) conformance tests
 #
 # Validates that the generic repository handles file uploads, downloads,
-# nested paths, content integrity, 404 for missing files, and overwrites.
+# nested paths, content integrity, 404 for missing files, and that a stored
+# path cannot be overwritten (409).
 #
 # Endpoints: ${BASE_URL}/api/v1/repositories/{repo_key}/ (management API)
 #
@@ -115,37 +116,46 @@ if assert_eq "$status" "404" "expected 404 for nonexistent path, got ${status}";
 fi
 
 # ---------------------------------------------------------------------------
-# 6. Overwrite: PUT same path replaces the file
+# 6. Re-upload: PUT to a stored path is refused and keeps the original
+#
+# A generic path is write-once: the backend answers a second PUT to a live
+# path with 409 ("Artifact version already exists and is immutable"; body code
+# `IMMUTABLE_RELEASE` from backend fork #5, `CONFLICT` on older servers, so only
+# the status is asserted)
+# and serves the original bytes, whatever the new bytes are. This is the
+# always-on rule (no repository setting), so it holds with any release-
+# immutability policy off. A repository with versioning_enabled appends a
+# revision instead; this suite's repository does not set it.
 # ---------------------------------------------------------------------------
 
-begin_test "Overwrite replaces file content"
-echo "original content for overwrite test" > "${WORK_DIR}/overwrite.txt"
-ORIG_OVERWRITE_SHA=$(shasum -a 256 "${WORK_DIR}/overwrite.txt" | awk '{print $1}')
+begin_test "Re-upload of a stored path is refused with 409 and keeps the original"
+echo "original content for re-upload test" > "${WORK_DIR}/reupload.txt"
+ORIG_REUPLOAD_SHA=$(shasum -a 256 "${WORK_DIR}/reupload.txt" | awk '{print $1}')
+echo "replacement content for re-upload test -- different bytes" > "${WORK_DIR}/reupload-v2.txt"
+REUPLOAD_URL="${BASE_URL}/api/v1/repositories/${REPO_KEY}/artifacts/reupload-test/data.txt"
 
-# Upload the original
-api_upload "/api/v1/repositories/${REPO_KEY}/artifacts/overwrite-test/data.txt" \
-    "${WORK_DIR}/overwrite.txt" "text/plain" > /dev/null 2>&1 || true
-
-# Upload a replacement with different content
-echo "replaced content for overwrite test -- different bytes" > "${WORK_DIR}/overwrite-v2.txt"
-NEW_SHA=$(shasum -a 256 "${WORK_DIR}/overwrite-v2.txt" | awk '{print $1}')
-
-if api_upload "/api/v1/repositories/${REPO_KEY}/artifacts/overwrite-test/data.txt" \
-    "${WORK_DIR}/overwrite-v2.txt" "text/plain" > /dev/null; then
-  # Download and verify the new content is served
-  if curl -sf $CURL_TIMEOUT \
-      -H "$(auth_header)" \
-      -o "${WORK_DIR}/overwrite-dl.txt" \
-      "${BASE_URL}/api/v1/repositories/${REPO_KEY}/download/overwrite-test/data.txt"; then
-    DL_SHA=$(shasum -a 256 "${WORK_DIR}/overwrite-dl.txt" | awk '{print $1}')
-    if assert_eq "$DL_SHA" "$NEW_SHA" "overwritten file should have new content SHA256"; then
-      pass
-    fi
-  else
-    fail "download after overwrite returned non-2xx"
-  fi
+if ! api_upload "/api/v1/repositories/${REPO_KEY}/artifacts/reupload-test/data.txt" \
+    "${WORK_DIR}/reupload.txt" "text/plain" > /dev/null; then
+  fail "original upload returned non-2xx"
 else
-  fail "overwrite upload returned non-2xx"
+  status=$(curl -s -o "${WORK_DIR}/reupload-resp.json" -w '%{http_code}' $CURL_TIMEOUT -X PUT \
+    -H "$(auth_header)" \
+    -H "Content-Type: text/plain" \
+    --data-binary "@${WORK_DIR}/reupload-v2.txt" \
+    "$REUPLOAD_URL") || true
+  if assert_eq "$status" "409" "re-upload to a stored path should return 409, got ${status}: $(head -c 200 "${WORK_DIR}/reupload-resp.json" 2>/dev/null)"; then
+    if curl -sf $CURL_TIMEOUT \
+        -H "$(auth_header)" \
+        -o "${WORK_DIR}/reupload-dl.txt" \
+        "${BASE_URL}/api/v1/repositories/${REPO_KEY}/download/reupload-test/data.txt"; then
+      DL_SHA=$(shasum -a 256 "${WORK_DIR}/reupload-dl.txt" | awk '{print $1}')
+      if assert_eq "$DL_SHA" "$ORIG_REUPLOAD_SHA" "a refused re-upload must leave the original content in place"; then
+        pass
+      fi
+    else
+      fail "download after refused re-upload returned non-2xx"
+    fi
+  fi
 fi
 
 end_suite
